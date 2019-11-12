@@ -1,11 +1,8 @@
 #!/usr/bin/env python
 import os, argparse, time
 import utils
-from keras.models import Sequential
-from keras.layers import Dense, Activation, Dropout
-from keras.layers import LSTM
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, TensorBoard
-from keras.optimizers import SGD, RMSprop, Adagrad, Adadelta, Adam, Adamax, Nadam
+import torch
+from torch import nn, optim 
 
 OUTPUT_SIZE = 129 # 0-127 notes + 1 for rests
 
@@ -57,72 +54,75 @@ def parse_args():
 
 # create or load a saved model
 # returns the model and the epoch number (>1 if loaded from checkpoint)
+
+
+class Model(nn.Module):
+    def __init__(self, args):
+        super(Model, self).__init__()
+        self.lstm = nn.LSTM(input_size=OUTPUT_SIZE,
+                            hidden_size=args.rnn_size,
+                            num_layers=args.num_layers,
+                            batch_first=True)
+        self.dropout = nn.Dropout(args.dropout)
+        self.fc = nn.Linear(args.rnn_size, OUTPUT_SIZE)
+        self.softmax = nn.Softmax()
+
+    def forward(self, x):
+        x, _ = self.lstm(x)
+        x = self.dropout(x)
+        x = self.fc(x)
+        return self.softmax(x)
+
 def get_model(args, experiment_dir=None):
     
     epoch = 0
     
     if not experiment_dir:
-        model = Sequential()
-        for layer_index in range(args.num_layers):
-            kwargs = dict() 
-            kwargs['units'] = args.rnn_size
-            # if this is the first layer
-            if layer_index == 0:
-                kwargs['input_shape'] = (args.window_size, OUTPUT_SIZE)
-                if args.num_layers == 1:
-                    kwargs['return_sequences'] = False
-                else:
-                    kwargs['return_sequences'] = True
-                model.add(LSTM(**kwargs))
-            else:
-                # if this is a middle layer
-                if not layer_index == args.num_layers - 1:
-                    kwargs['return_sequences'] = True
-                    model.add(LSTM(**kwargs))
-                else: # this is the last layer
-                    kwargs['return_sequences'] = False
-                    model.add(LSTM(**kwargs))
-            model.add(Dropout(args.dropout))
-        model.add(Dense(OUTPUT_SIZE))
-        model.add(Activation('softmax'))
+        model = Model(args)
+
     else:
         model, epoch = utils.load_model_from_checkpoint(experiment_dir)
 
     # these cli args aren't specified if get_model() is being
     # being called from sample.py
-    if 'grad_clip' in args and 'optimizer' in args:
-        kwargs = { 'clipvalue': args.grad_clip }
+    # ----------------------------------------------------------
 
-        if args.learning_rate:
-            kwargs['lr'] = args.learning_rate
+
+    # model.compile(loss='categorical_crossentropy', 
+    #               optimizer=optimizer,
+    #               metrics=['accuracy'])
+    return model, epoch
+
+def get_optimizer(args, model):
+    if args.learning_rate == None:
+        utils.log(
+            'Error: Please define --learning_rate. Exiting.',
+            True)
+        exit(1)
+    if 'optimizer' in args: # 'grad_clip' in args and
+        #kwargs = { 'clipvalue': args.grad_clip }
 
         # select the optimizers
         if args.optimizer == 'sgd':
-            optimizer = SGD(**kwargs)
+            optimizer = optim.SGD(model.parameters(), args.learning_rate)
         elif args.optimizer == 'rmsprop':
-            optimizer = RMSprop(**kwargs)
+            optimizer = optim.RMSprop(model.parameters(), args.learning_rate)
         elif args.optimizer == 'adagrad':
-            optimizer = Adagrad(**kwargs)
+            optimizer = optim.Adagrad(model.parameters(), args.learning_rate)
         elif args.optimizer == 'adadelta':
-            optimizer = Adadelta(**kwargs)
+            optimizer = optim.Adadelta(model.parameters(), args.learning_rate)
         elif args.optimizer == 'adam':
-            optimizer = Adam(**kwargs)
+            optimizer = optim.Adam(model.parameters(), args.learning_rate)
         elif args.optimizer == 'adamax':
-            optimizer = Adamax(**kwargs)
-        elif args.optimizer == 'nadam':
-            optimizer = Nadam(**kwargs)
+            optimizer = optim.Adamax(model.parameters(), args.learning_rate)
         else:
             utils.log(
                 'Error: {} is not a supported optimizer. Exiting.'.format(args.optimizer),
                 True)
             exit(1)
     else: # so instead lets use a default (no training occurs anyway)
-        optimizer = Adam()
-
-    model.compile(loss='categorical_crossentropy', 
-                  optimizer=optimizer,
-                  metrics=['accuracy'])
-    return model, epoch
+        optimizer = optim.Adam(model.parameters(), args.learning_rate)
+    return optimizer
 
 def get_callbacks(experiment_dir, checkpoint_monitor='val_acc'):
     
@@ -207,30 +207,85 @@ def main():
                                              batch_size=args.batch_size,
                                              num_threads=args.n_jobs,
                                              max_files_in_ram=args.max_files_in_ram)
+train.py --niter 20 --niter_decay 20 --save_epoch_freq 10 --dataset_mode npy_aligned_3d --dataroot ../3D_460_patchified_norm/ --model paired_revgan3d --name 3d_460 --which_model_netG edsrF_generator_3d --gpu_ids 0,1 --batchSize 2 --which_model_netD n_layers --n_layers_D 2 --lr_G 0.0001 --lr_D 0.0004
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #device = 'cpu'
+    print(device)
 
     model, epoch = get_model(args)
+
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+    model.to(device)
     if args.verbose:
-        print(model.summary())
+        print(model)
 
     utils.save_model(model, experiment_dir)
-    utils.log('Saved model to {}'.format(os.path.join(experiment_dir, 'model.json')),
+    utils.log('Saved model to {}'.format(os.path.join(experiment_dir, 'model.pth')),
               args.verbose)
 
-    callbacks = get_callbacks(experiment_dir)
+    #callbacks = get_callbacks(experiment_dir)
+
+    criterion = nn.NLLLoss().float()
+    optimizer = get_optimizer(args, model)
     
     print('fitting model...')
-    # this is a somewhat magic number which is the average number of length-20 windows
-    # calculated from ~5K MIDI files from the Lakh MIDI Dataset.
-    magic_number = 827
     start_time = time.time()
-    model.fit_generator(train_generator,
-                        steps_per_epoch=len(midi_files) * magic_number / args.batch_size, 
-                        epochs=args.num_epochs,
-                        validation_data=val_generator, 
-                        validation_steps=len(midi_files) * 0.2 * magic_number / args.batch_size,
-                        verbose=1, 
-                        callbacks=callbacks,
-                        initial_epoch=epoch)
+
+    train_losses, val_losses = [], []
+    for e in range(args.num_epochs):
+        print('Epoch', e+1)
+        running_loss = 0
+        len_train_generator = 0
+        len_val_generator = 0
+        for x, y in train_generator:
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+            log_ps = model(x.float())
+            loss = criterion(log_ps, y.long())
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+            len_train_generator += 1
+            #print(len_train_generator)
+        else:
+            val_loss = 0
+            accuracy = 0
+            with torch.no_grad():
+                model.eval()
+                for x, y in val_generator:
+                    x, y = x.to(device), y.to(device)
+                    log_ps = model(x.float())
+                    val_loss += criterion(log_ps, y.long())
+                    # convert log probabilities to probabilites
+                    ps = torch.exp(log_ps)
+                    # select the highest
+                    top_p, top_class = ps.topk(1, dim=1)
+                    equals = top_class == labels.view(*top_class.shape)
+                    accuracy += torch.mean(equals.type(torch.FloatTensor))
+                    len_val_generator += 1
+        # set the model back to train mode after the eval mode
+        model.train()
+        
+        train_losses.append(running_loss/len_train_generator)
+        val_losses.append(val_loss/len_val_generator)
+        
+        print("\nEpoch: {}/{}.. ".format(e+1, epochs),
+              "Training Loss: {:.3f}   ".format(running_loss/len_train_generator),
+              "Validation Loss: {:.3f}   ".format(val_loss/len_val_generator),
+              "Validation Accuracy: {:.3f}".format(accuracy/len_val_generator))
+        
+        utils.save_model(model, experiment_dir)
+        # Model Checkpoint
+        # if val_losses[-1] < best_val_loss:
+        #     print('Validation loss improved from {:.3f} to {:.3f}, saving the model.'.format(best_val_loss,
+        #                                                                                      val_losses[-1]))
+        #     best_val_loss = val_losses[-1]
+        #     checkpoint = {'model': model,
+        #                   'idx_to_class': idx_to_class}
+        #     torch.save(checkpoint, 'checkpoint.pth')
+ 
+
     utils.log('Finished in {:.2f} seconds'.format(time.time() - start_time), args.verbose)
 
 if __name__ == '__main__':

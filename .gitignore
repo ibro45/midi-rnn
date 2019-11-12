@@ -2,3 +2,7 @@ venv
 experiments/*
 !experiments/.gitkeep
 *.pyc
+
+\.ipynb_checkpoints/
+
+a\.py

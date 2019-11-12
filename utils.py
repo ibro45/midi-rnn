@@ -1,7 +1,7 @@
 import os, glob, random
 import pretty_midi
 import numpy as np
-from keras.models import model_from_json
+import torch
 from multiprocessing import Pool as ThreadPool
 
 def log(message, verbose):
@@ -110,14 +110,9 @@ def get_data_generator(midi_paths,
                    data[1][batch_index: batch_index + batch_size])
             yield res
             batch_index = batch_index + batch_size
-        
-        # probably unneeded but why not
-        del parsed # free the mem
-        del data # free the mem
 
 def save_model(model, model_dir):
-    with open(os.path.join(model_dir, 'model.json'), 'w') as f:
-        f.write(model.to_json())
+    torch.save(model.state_dict(), os.path.join(model_dir, 'model.pth'))
 
 def load_model_from_checkpoint(model_dir):
 
@@ -226,7 +221,8 @@ def _windows_from_monophonic_instruments(midi, window_size):
                     for w in windows:
                         X.append(w[0])
                         y.append(w[1])
-    return (np.asarray(X), np.asarray(y))
+    X, y = np.asarray(X), np.asarray(y)
+    return torch.Tensor(X), torch.Tensor(y)
 
 # one-hot encode a sliding window of notes from a pretty midi instrument.
 # This approach uses the piano roll method, where each step in the sliding
