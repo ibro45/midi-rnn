@@ -207,7 +207,6 @@ def main():
                                              batch_size=args.batch_size,
                                              num_threads=args.n_jobs,
                                              max_files_in_ram=args.max_files_in_ram)
-train.py --niter 20 --niter_decay 20 --save_epoch_freq 10 --dataset_mode npy_aligned_3d --dataroot ../3D_460_patchified_norm/ --model paired_revgan3d --name 3d_460 --which_model_netG edsrF_generator_3d --gpu_ids 0,1 --batchSize 2 --which_model_netD n_layers --n_layers_D 2 --lr_G 0.0001 --lr_D 0.0004
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     #device = 'cpu'
     print(device)
